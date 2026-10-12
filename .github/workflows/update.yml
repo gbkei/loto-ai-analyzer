@@ -1,0 +1,27 @@
+name: Update lottery draw results
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '20 13 * * 1,4,5'
+permissions:
+  contents: write
+concurrency:
+  group: lottery-results
+  cancel-in-progress: false
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python scripts/update_results.py
+      - name: Commit new results
+        run: |
+          if git diff --quiet -- data/latest.json; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add data/latest.json
+          git commit -m 'Update published lottery results'
+          git push
