@@ -1,90 +1,104 @@
-"""Read the draw CSVs used by Mizuho Bank's official results pages."""
+"""Combine Rakuten's published results with thekyo's downloadable history CSVs."""
 import csv
 import datetime as dt
 import io
 import json
 import pathlib
 import re
-import unicodedata
 import urllib.request
+from bs4 import BeautifulSoup
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-BASE = 'https://www.mizuhobank.co.jp/retail/takarakuji/loto/'
-GAMES = {'loto6': (2, 6, 43), 'loto7': (3, 7, 37)}
+GAMES = {'loto6': (6, 43), 'loto7': (7, 37)}
 
 
-def read_csv(url):
-    request = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0', 'Accept': 'text/csv,text/plain,*/*', 'Referer': 'https://www.mizuhobank.co.jp/retail/takarakuji/loto/'})
-    with urllib.request.urlopen(request, timeout=25) as response:
-        text = response.read().decode('cp932')
-    return list(csv.reader(io.StringIO(unicodedata.normalize('NFKC', text))))
+def read(url, encoding):
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    with urllib.request.urlopen(req, timeout=30) as response:
+        return response.read().decode(encoding)
 
 
-def parse_date(value):
-    match = re.fullmatch(r'(令和|平成|昭和)(元|\d+)年(\d+)月(\d+)日', value.strip())
-    if not match:
-        raise ValueError('Unrecognized official draw date: ' + value)
-    era, year, month, day = match.groups()
-    year = (1 if year == '元' else int(year)) + {'令和': 2018, '平成': 1988, '昭和': 1925}[era]
-    date = dt.date(year, int(month), int(day))
-    if date > dt.datetime.now(dt.timezone(dt.timedelta(hours=9))).date():
-        raise ValueError('Future draw date')
-    return date.isoformat()
+def draw(game, number, date, values):
+    count, maximum = GAMES[game]
+    date = dt.date.fromisoformat(date)
+    today = dt.datetime.now(dt.timezone(dt.timedelta(hours=9))).date()
+    values = list(values)
+    if not isinstance(number, int) or number < 1 or date > today:
+        raise ValueError(f'{game}: invalid round or date')
+    if len(values) != count or len(set(values)) != count or any(not isinstance(n, int) or not 1 <= n <= maximum for n in values):
+        raise ValueError(f'{game}: invalid main numbers')
+    return {'round': number, 'date': date.isoformat(), 'nums': sorted(values)}
 
 
-def parse_header(row, game):
-    match = re.fullmatch(r'第(\d+)回ロト' + game[-1], row[0].strip()) if row else None
-    if not match or len(row) < 3 or int(match[1]) < 1:
-        raise ValueError('Unrecognized official draw header')
-    return int(match[1]), parse_date(row[2])
+def parse_rakuten(text, game):
+    soup = BeautifulSoup(text, 'html.parser')
+    results = {}
+    for table in soup.select('table.tblNumberGuid'):
+        fields = {}
+        for row in table.select('tr'):
+            cells = row.find_all(['th', 'td'], recursive=False)
+            if cells:
+                fields[cells[0].get_text(strip=True)] = [c.get_text(strip=True) for c in cells[1:]]
+        if '回号' not in fields:
+            continue
+        m = re.fullmatch(r'第(\d+)回', ''.join(fields['回号']))
+        if not m or '抽せん日' not in fields or '本数字' not in fields:
+            raise ValueError(f'{game}: Rakuten table format changed')
+        date = dt.datetime.strptime(''.join(fields['抽せん日']), '%Y/%m/%d').date().isoformat()
+        result = draw(game, int(m[1]), date, [int(x) for x in fields['本数字']])
+        if result['round'] in results:
+            raise ValueError('Duplicate Rakuten round')
+        results[result['round']] = result
+    if not results:
+        raise ValueError(f'{game}: no Rakuten results')
+    return results
 
 
-def parse_draw(rows, game, expected_round, expected_date):
-    prefix, count, maximum = GAMES[game]
-    if len(rows) < 4 or rows[0] != [f'A5{prefix}']:
-        raise ValueError('Unrecognized official CSV format')
-    round_number, date = parse_header(rows[1], game)
-    if (round_number, date) != (expected_round, expected_date):
-        raise ValueError('Official index and draw CSV disagree')
-    numbers = rows[3]
-    if len(numbers) <= count + 1 or numbers[0] != '本数字' or numbers[count + 1] != 'ボーナス数字':
-        raise ValueError('Main number columns changed')
-    values = [int(value) for value in numbers[1:count + 1]]
-    if len(set(values)) != count or not all(1 <= value <= maximum for value in values):
-        raise ValueError('Invalid main numbers')
-    return {'round': round_number, 'date': date, 'nums': sorted(values)}
+def parse_history(text, game):
+    count, _ = GAMES[game]
+    rows = csv.DictReader(io.StringIO(text.lstrip('\ufeff')))
+    required = ['開催回', '日付'] + [f'第{i}数字' for i in range(1, count + 1)]
+    if not rows.fieldnames or not all(name in rows.fieldnames for name in required):
+        raise ValueError(f'{game}: history CSV columns changed')
+    results = {}
+    for row in rows:
+        date = dt.datetime.strptime(row['日付'], '%Y/%m/%d').date().isoformat()
+        result = draw(game, int(row['開催回']), date, [int(row[f'第{i}数字']) for i in range(1, count + 1)])
+        if result['round'] in results:
+            raise ValueError('Duplicate history round')
+        results[result['round']] = result
+    if not results or sorted(results) != list(range(1, max(results) + 1)):
+        raise ValueError(f'{game}: empty or incomplete history')
+    return results
 
 
 def fetch(game, previous):
-    prefix, _, _ = GAMES[game]
-    base = BASE + game + '/csv/'
-    index_url = base + game + '.csv'
-    rows = read_csv(index_url)
-    draws = {row['round']: row for row in previous.get('draws', [])} if previous.get('source') == index_url else {}
-    issues = []
-    for i in range(0, len(rows), 2):
-        if rows[i] != [f'A5{prefix}'] or i + 1 >= len(rows):
-            raise ValueError('Official index format changed')
-        issues.append(parse_header(rows[i + 1], game))
-    if not issues or len({r for r, _ in issues}) != len(issues):
-        raise ValueError('Empty or duplicate official draw index')
-    issues.sort(reverse=True)
-    if draws and max(draws) > issues[0][0]:
-        raise ValueError('Official index regressed; keeping previous file')
-    for number, date in issues[:100]:
-        # Always recheck the latest draw. Existing official historical data is retained.
-        if number in draws and number != issues[0][0]:
-            continue
-        url = base + f'A10{prefix}{number:04d}.CSV'
-        draws[number] = parse_draw(read_csv(url), game, number, date)
-    print(game, 'official draws', len(draws), 'latest', issues[0][0], flush=True)
-    return {'source': index_url, 'draws': sorted(draws.values(), key=lambda row: row['round'], reverse=True)}
+    latest_url = f'https://takarakuji.rakuten.co.jp/backnumber/{game}/'
+    history_url = f'https://{game}.thekyo.jp/data/{game}.csv'
+    latest = parse_rakuten(read(latest_url, 'utf-8'), game)
+    history = parse_history(read(history_url, 'cp932'), game)
+    for number in latest.keys() & history.keys():
+        if latest[number] != history[number]:
+            raise ValueError(f'{game}: Rakuten and history disagree at round {number}')
+    newest = max(latest)
+    old = {r['round']: draw(game, r['round'], r['date'], r['nums']) for r in previous.get('draws', [])}
+    if max(history) > newest or (old and max(old) > newest):
+        raise ValueError(f'{game}: latest source is behind history; keeping previous data')
+    merged = {**old, **history, **latest}
+    if sorted(merged) != list(range(1, newest + 1)):
+        raise ValueError(f'{game}: missing rounds')
+    print(game, 'draws', len(merged), 'latest', newest, latest[newest], flush=True)
+    return {
+        'source': latest_url, 'sourceName': '楽天×宝くじ',
+        'historySource': history_url, 'historySourceName': 'thekyo（非公式CSV）',
+        'draws': sorted(merged.values(), key=lambda row: row['round'], reverse=True),
+    }
 
 
 def main():
     dest = ROOT / 'data/latest.json'
     previous = json.loads(dest.read_text()) if dest.exists() else {}
-    # Publish only after both games succeed; failures retain the previous file.
+    # Both games must succeed before any published data is replaced.
     games = {game: fetch(game, previous.get('games', {}).get(game, {})) for game in GAMES}
     payload = {'generatedAt': dt.datetime.now(dt.timezone.utc).isoformat(), 'games': games}
     dest.parent.mkdir(parents=True, exist_ok=True)
