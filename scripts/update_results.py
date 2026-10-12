@@ -14,7 +14,7 @@ GAMES = {'loto6': (2, 6, 43), 'loto7': (3, 7, 37)}
 
 
 def read_csv(url):
-    request = urllib.request.Request(url, headers={'User-Agent': 'LotoResultsReader/1.1'})
+    request = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0', 'Accept': 'text/csv,text/plain,*/*', 'Referer': 'https://www.mizuhobank.co.jp/retail/takarakuji/loto/'})
     with urllib.request.urlopen(request, timeout=25) as response:
         text = response.read().decode('cp932')
     return list(csv.reader(io.StringIO(unicodedata.normalize('NFKC', text))))
