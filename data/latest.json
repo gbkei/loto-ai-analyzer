@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-30T18:39:05.858843+00:00",
+  "generatedAt": "2026-11-02T22:21:26.267615+00:00",
   "games": {
     "loto6": {
       "source": "https://takarakuji.rakuten.co.jp/backnumber/loto6/",
@@ -7,6 +7,18 @@
       "historySource": "https://loto6.thekyo.jp/data/loto6.csv",
       "historySourceName": "thekyo（非公式CSV）",
       "draws": [
+        {
+          "round": 2151,
+          "date": "2026-11-02",
+          "nums": [
+            4,
+            9,
+            11,
+            23,
+            24,
+            37
+          ]
+        },
         {
           "round": 2150,
           "date": "2026-10-29",
